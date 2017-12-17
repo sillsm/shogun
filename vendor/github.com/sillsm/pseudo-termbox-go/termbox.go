@@ -42,6 +42,14 @@ type input_event struct {
 }
 
 var (
+	// grayscale indexes
+	grayscale = []Attribute{
+		0, 17, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244,
+		245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 255, 256, 232,
+	}
+)
+
+type TermClient struct {
 	// term specific sequences
 	keys  []string
 	funcs []string
@@ -52,83 +60,82 @@ var (
 	front_buffer   cellbuf
 	termw          int
 	termh          int
-	input_mode     = InputEsc
-	output_mode    = OutputNormal
+	input_mode     InputMode
+	output_mode    OutputMode
 	out            *os.File
 	in             int
-	lastfg         = attr_invalid
-	lastbg         = attr_invalid
-	lastx          = coord_invalid
-	lasty          = coord_invalid
-	cursor_x       = cursor_hidden
-	cursor_y       = cursor_hidden
-	foreground     = ColorDefault
-	background     = ColorDefault
-	inbuf          = make([]byte, 0, 64)
+	lastfg         Attribute
+	lastbg         Attribute
+	lastx          int
+	lasty          int
+	cursor_x       int
+	cursor_y       int
+	foreground     Attribute
+	background     Attribute
+	inbuf          []byte
 	outbuf         bytes.Buffer
-	sigwinch       = make(chan os.Signal, 1)
-	sigio          = make(chan os.Signal, 1)
-	quit           = make(chan int)
-	input_comm     = make(chan input_event)
-	interrupt_comm = make(chan struct{})
-	intbuf         = make([]byte, 0, 16)
-
-	// grayscale indexes
-	grayscale = []Attribute{
-		0, 17, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244,
-		245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 255, 256, 232,
-	}
-)
-
-func write_cursor(x, y int) {
-	outbuf.WriteString("\033[")
-	outbuf.Write(strconv.AppendUint(intbuf, uint64(y+1), 10))
-	outbuf.WriteString(";")
-	outbuf.Write(strconv.AppendUint(intbuf, uint64(x+1), 10))
-	outbuf.WriteString("H")
+	Out            bytes.Buffer
+	sigwinch       chan os.Signal
+	sigio          chan os.Signal
+	quit           chan int
+	input_comm     chan input_event
+	Input_comm     chan input_event
+	Win_chan       chan Winsize
+	interrupt_comm chan struct{}
+	intbuf         []byte
+	// To know if termbox has been initialized or not
+	IsInit bool
 }
 
-func write_sgr_fg(a Attribute) {
-	switch output_mode {
-	case Output256, Output216, OutputGrayscale:
-		outbuf.WriteString("\033[38;5;")
-		outbuf.Write(strconv.AppendUint(intbuf, uint64(a-1), 10))
-		outbuf.WriteString("m")
-	default:
-		outbuf.WriteString("\033[3")
-		outbuf.Write(strconv.AppendUint(intbuf, uint64(a-1), 10))
-		outbuf.WriteString("m")
-	}
+func (t *TermClient) write_cursor(x, y int) {
+	t.outbuf.WriteString("\033[")
+	t.outbuf.Write(strconv.AppendUint(t.intbuf, uint64(y+1), 10))
+	t.outbuf.WriteString(";")
+	t.outbuf.Write(strconv.AppendUint(t.intbuf, uint64(x+1), 10))
+	t.outbuf.WriteString("H")
 }
 
-func write_sgr_bg(a Attribute) {
-	switch output_mode {
+func (t *TermClient) write_sgr_fg(a Attribute) {
+	switch t.output_mode {
 	case Output256, Output216, OutputGrayscale:
-		outbuf.WriteString("\033[48;5;")
-		outbuf.Write(strconv.AppendUint(intbuf, uint64(a-1), 10))
-		outbuf.WriteString("m")
+		t.outbuf.WriteString("\033[38;5;")
+		t.outbuf.Write(strconv.AppendUint(t.intbuf, uint64(a-1), 10))
+		t.outbuf.WriteString("m")
 	default:
-		outbuf.WriteString("\033[4")
-		outbuf.Write(strconv.AppendUint(intbuf, uint64(a-1), 10))
-		outbuf.WriteString("m")
+		t.outbuf.WriteString("\033[3")
+		t.outbuf.Write(strconv.AppendUint(t.intbuf, uint64(a-1), 10))
+		t.outbuf.WriteString("m")
 	}
 }
 
-func write_sgr(fg, bg Attribute) {
-	switch output_mode {
+func (t *TermClient) write_sgr_bg(a Attribute) {
+	switch t.output_mode {
 	case Output256, Output216, OutputGrayscale:
-		outbuf.WriteString("\033[38;5;")
-		outbuf.Write(strconv.AppendUint(intbuf, uint64(fg-1), 10))
-		outbuf.WriteString("m")
-		outbuf.WriteString("\033[48;5;")
-		outbuf.Write(strconv.AppendUint(intbuf, uint64(bg-1), 10))
-		outbuf.WriteString("m")
+		t.outbuf.WriteString("\033[48;5;")
+		t.outbuf.Write(strconv.AppendUint(t.intbuf, uint64(a-1), 10))
+		t.outbuf.WriteString("m")
 	default:
-		outbuf.WriteString("\033[3")
-		outbuf.Write(strconv.AppendUint(intbuf, uint64(fg-1), 10))
-		outbuf.WriteString(";4")
-		outbuf.Write(strconv.AppendUint(intbuf, uint64(bg-1), 10))
-		outbuf.WriteString("m")
+		t.outbuf.WriteString("\033[4")
+		t.outbuf.Write(strconv.AppendUint(t.intbuf, uint64(a-1), 10))
+		t.outbuf.WriteString("m")
+	}
+}
+
+func (t *TermClient) write_sgr(fg, bg Attribute) {
+	switch t.output_mode {
+	case Output256, Output216, OutputGrayscale:
+		t.outbuf.WriteString("\033[38;5;")
+		t.outbuf.Write(strconv.AppendUint(t.intbuf, uint64(fg-1), 10))
+		t.outbuf.WriteString("m")
+		t.outbuf.WriteString("\033[48;5;")
+		t.outbuf.Write(strconv.AppendUint(t.intbuf, uint64(bg-1), 10))
+		t.outbuf.WriteString("m")
+	default:
+		t.outbuf.WriteString("\033[3")
+		t.outbuf.Write(strconv.AppendUint(t.intbuf, uint64(fg-1), 10))
+		t.outbuf.WriteString(";4")
+		t.outbuf.Write(strconv.AppendUint(t.intbuf, uint64(bg-1), 10))
+		t.outbuf.WriteString("m")
 	}
 }
 
@@ -139,23 +146,28 @@ type winsize struct {
 	ypixels uint16
 }
 
-func get_term_size(fd uintptr) (int, int) {
+type Winsize struct {
+	Rows int
+	Cols int
+}
+
+func (t *TermClient) get_term_size(fd uintptr) (int, int) {
 	var sz winsize
 	_, _, _ = syscall.Syscall(syscall.SYS_IOCTL,
 		fd, uintptr(syscall.TIOCGWINSZ), uintptr(unsafe.Pointer(&sz)))
 	return int(sz.cols), int(sz.rows)
 }
 
-func send_attr(fg, bg Attribute) {
-	if fg == lastfg && bg == lastbg {
+func (t *TermClient) send_attr(fg, bg Attribute) {
+	if fg == t.lastfg && bg == t.lastbg {
 		return
 	}
 
-	outbuf.WriteString(funcs[t_sgr0])
+	t.outbuf.WriteString(t.funcs[t_sgr0])
 
 	var fgcol, bgcol Attribute
 
-	switch output_mode {
+	switch t.output_mode {
 	case Output256:
 		fgcol = fg & 0x1FF
 		bgcol = bg & 0x1FF
@@ -196,51 +208,53 @@ func send_attr(fg, bg Attribute) {
 
 	if fgcol != ColorDefault {
 		if bgcol != ColorDefault {
-			write_sgr(fgcol, bgcol)
+			t.write_sgr(fgcol, bgcol)
 		} else {
-			write_sgr_fg(fgcol)
+			t.write_sgr_fg(fgcol)
 		}
 	} else if bgcol != ColorDefault {
-		write_sgr_bg(bgcol)
+		t.write_sgr_bg(bgcol)
 	}
 
 	if fg&AttrBold != 0 {
-		outbuf.WriteString(funcs[t_bold])
+		t.outbuf.WriteString(t.funcs[t_bold])
 	}
 	if bg&AttrBold != 0 {
-		outbuf.WriteString(funcs[t_blink])
+		t.outbuf.WriteString(t.funcs[t_blink])
 	}
 	if fg&AttrUnderline != 0 {
-		outbuf.WriteString(funcs[t_underline])
+		t.outbuf.WriteString(t.funcs[t_underline])
 	}
 	if fg&AttrReverse|bg&AttrReverse != 0 {
-		outbuf.WriteString(funcs[t_reverse])
+		t.outbuf.WriteString(t.funcs[t_reverse])
 	}
 
-	lastfg, lastbg = fg, bg
+	t.lastfg, t.lastbg = fg, bg
 }
 
-func send_char(x, y int, ch rune) {
+func (t *TermClient) send_char(x, y int, ch rune) {
 	var buf [8]byte
 	n := utf8.EncodeRune(buf[:], ch)
-	if x-1 != lastx || y != lasty {
-		write_cursor(x, y)
+	if x-1 != t.lastx || y != t.lasty {
+		t.write_cursor(x, y)
 	}
-	lastx, lasty = x, y
-	outbuf.Write(buf[:n])
+	t.lastx, t.lasty = x, y
+	t.outbuf.Write(buf[:n])
 }
 
-func flush() error {
-	_, err := io.Copy(out, &outbuf)
-	outbuf.Reset()
+func (t *TermClient) flush() error {
+	// Note(max). Simple as this. You can divert screen output to bytes buffer
+	// here, instead of file or screen handler.
+	_, err := io.Copy(&t.Out, &t.outbuf)
+	t.outbuf.Reset()
 	return err
 }
 
-func send_clear() error {
-	send_attr(foreground, background)
-	outbuf.WriteString(funcs[t_clear_screen])
-	if !is_cursor_hidden(cursor_x, cursor_y) {
-		write_cursor(cursor_x, cursor_y)
+func (t *TermClient) send_clear() error {
+	t.send_attr(t.foreground, t.background)
+	t.outbuf.WriteString(t.funcs[t_clear_screen])
+	if !is_cursor_hidden(t.cursor_x, t.cursor_y) {
+		t.write_cursor(t.cursor_x, t.cursor_y)
 	}
 
 	// we need to invalidate cursor position too and these two vars are
@@ -248,25 +262,37 @@ func send_clear() error {
 	// actually may be in the correct place, but we simply discard
 	// optimization once and it gives us simple solution for the case when
 	// cursor moved
-	lastx = coord_invalid
-	lasty = coord_invalid
+	t.lastx = coord_invalid
+	t.lasty = coord_invalid
 
-	return flush()
+	return t.flush()
 }
 
-func update_size_maybe() error {
-	w, h := get_term_size(out.Fd())
-	if w != termw || h != termh {
-		termw, termh = w, h
-		back_buffer.resize(termw, termh)
-		front_buffer.resize(termw, termh)
-		front_buffer.clear()
-		return send_clear()
+func (t *TermClient) update_size_maybe() error {
+	select {
+	case size := <-t.Win_chan:
+		termw := size.Cols
+		termh := size.Rows
+		t.back_buffer.resize(t, termw, termh)
+		t.front_buffer.resize(t, termw, termh)
+		t.front_buffer.clear(t)
+		return t.send_clear()
+	default:
+		return nil
+
 	}
+	//w, h := get_term_size(out.Fd())
+	//if w != termw || h != termh {
+	//termw, termh = w, h
+	//back_buffer.resize(termw, termh)
+	////front_buffer.resize(termw, termh)
+	//front_buffer.clear()
+	//return send_clear()
+	//}
 	return nil
 }
 
-func tcsetattr(fd uintptr, termios *syscall_Termios) error {
+func (t *TermClient) tcsetattr(fd uintptr, termios *syscall_Termios) error {
 	r, _, e := syscall.Syscall(syscall.SYS_IOCTL,
 		fd, uintptr(syscall_TCSETS), uintptr(unsafe.Pointer(termios)))
 	if r != 0 {
@@ -275,7 +301,7 @@ func tcsetattr(fd uintptr, termios *syscall_Termios) error {
 	return nil
 }
 
-func tcgetattr(fd uintptr, termios *syscall_Termios) error {
+func (t *TermClient) tcgetattr(fd uintptr, termios *syscall_Termios) error {
 	r, _, e := syscall.Syscall(syscall.SYS_IOCTL,
 		fd, uintptr(syscall_TCGETS), uintptr(unsafe.Pointer(termios)))
 	if r != 0 {
@@ -284,7 +310,7 @@ func tcgetattr(fd uintptr, termios *syscall_Termios) error {
 	return nil
 }
 
-func parse_mouse_event(event *Event, buf string) (int, bool) {
+func (t *TermClient) parse_mouse_event(event *Event, buf string) (int, bool) {
 	if strings.HasPrefix(buf, "\033[M") && len(buf) >= 6 {
 		// X10 mouse encoding, the simplest one
 		// \033 [ M Cb Cx Cy
@@ -407,9 +433,9 @@ func parse_mouse_event(event *Event, buf string) (int, bool) {
 	return 0, false
 }
 
-func parse_escape_sequence(event *Event, buf []byte) (int, bool) {
+func (t *TermClient) parse_escape_sequence(event *Event, buf []byte) (int, bool) {
 	bufstr := string(buf)
-	for i, key := range keys {
+	for i, key := range t.keys {
 		if strings.HasPrefix(bufstr, key) {
 			event.Ch = 0
 			event.Key = Key(0xFFFF - i)
@@ -418,11 +444,11 @@ func parse_escape_sequence(event *Event, buf []byte) (int, bool) {
 	}
 
 	// if none of the keys match, let's try mouse seqences
-	return parse_mouse_event(event, bufstr)
+	return t.parse_mouse_event(event, bufstr)
 }
 
-func extract_raw_event(data []byte, event *Event) bool {
-	if len(inbuf) == 0 {
+func (t *TermClient) extract_raw_event(data []byte, event *Event) bool {
+	if len(t.inbuf) == 0 {
 		return false
 	}
 
@@ -431,41 +457,41 @@ func extract_raw_event(data []byte, event *Event) bool {
 		return false
 	}
 
-	n = copy(data, inbuf)
-	copy(inbuf, inbuf[n:])
-	inbuf = inbuf[:len(inbuf)-n]
+	n = copy(data, t.inbuf)
+	copy(t.inbuf, t.inbuf[n:])
+	t.inbuf = t.inbuf[:len(t.inbuf)-n]
 
 	event.N = n
 	event.Type = EventRaw
 	return true
 }
 
-func extract_event(inbuf []byte, event *Event) bool {
-	if len(inbuf) == 0 {
+func (t *TermClient) extract_event(inpbuf []byte, event *Event) bool {
+	if len(inpbuf) == 0 {
 		event.N = 0
 		return false
 	}
 
-	if inbuf[0] == '\033' {
+	if inpbuf[0] == '\033' {
 		// possible escape sequence
-		if n, ok := parse_escape_sequence(event, inbuf); n != 0 {
+		if n, ok := t.parse_escape_sequence(event, inpbuf); n != 0 {
 			event.N = n
 			return ok
 		}
 
 		// it's not escape sequence, then it's Alt or Esc, check input_mode
 		switch {
-		case input_mode&InputEsc != 0:
+		case t.input_mode&InputEsc != 0:
 			// if we're in escape mode, fill Esc event, pop buffer, return success
 			event.Ch = 0
 			event.Key = KeyEsc
 			event.Mod = 0
 			event.N = 1
 			return true
-		case input_mode&InputAlt != 0:
+		case t.input_mode&InputAlt != 0:
 			// if we're in alt mode, set Alt modifier to event and redo parsing
 			event.Mod = ModAlt
-			ok := extract_event(inbuf[1:], event)
+			ok := t.extract_event(inpbuf[1:], event)
 			if ok {
 				event.N++
 			} else {
@@ -481,16 +507,16 @@ func extract_event(inbuf []byte, event *Event) bool {
 	// so, it's a FUNCTIONAL KEY or a UNICODE character
 
 	// first of all check if it's a functional key
-	if Key(inbuf[0]) <= KeySpace || Key(inbuf[0]) == KeyBackspace2 {
+	if Key(inpbuf[0]) <= KeySpace || Key(inpbuf[0]) == KeyBackspace2 {
 		// fill event, pop buffer, return success
 		event.Ch = 0
-		event.Key = Key(inbuf[0])
+		event.Key = Key(inpbuf[0])
 		event.N = 1
 		return true
 	}
 
 	// the only possible option is utf8 rune
-	if r, n := utf8.DecodeRune(inbuf); r != utf8.RuneError {
+	if r, n := utf8.DecodeRune(inpbuf); r != utf8.RuneError {
 		event.Ch = r
 		event.Key = 0
 		event.N = n
@@ -500,7 +526,7 @@ func extract_event(inbuf []byte, event *Event) bool {
 	return false
 }
 
-func fcntl(fd int, cmd int, arg int) (val int, err error) {
+func (t *TermClient) fcntl(fd int, cmd int, arg int) (val int, err error) {
 	r, _, e := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), uintptr(cmd),
 		uintptr(arg))
 	val = int(r)

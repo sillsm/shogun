@@ -90,7 +90,7 @@ func ti_try_path(path string) (data []byte, err error) {
 	return
 }
 
-func setup_term_builtin() error {
+func (tc *TermClient) setup_term_builtin() error {
 	name := os.Getenv("TERM")
 	if name == "" {
 		return errors.New("termbox: TERM environment variable not set")
@@ -98,8 +98,8 @@ func setup_term_builtin() error {
 
 	for _, t := range terms {
 		if t.name == name {
-			keys = t.keys
-			funcs = t.funcs
+			tc.keys = t.keys
+			tc.funcs = t.funcs
 			return nil
 		}
 	}
@@ -122,8 +122,8 @@ func setup_term_builtin() error {
 	// try compatibility variants
 	for _, it := range compat_table {
 		if strings.Contains(name, it.partial) {
-			keys = it.keys
-			funcs = it.funcs
+			tc.keys = it.keys
+			tc.funcs = it.funcs
 			return nil
 		}
 	}
@@ -131,14 +131,14 @@ func setup_term_builtin() error {
 	return errors.New("termbox: unsupported terminal")
 }
 
-func setup_term() (err error) {
+func (t *TermClient) setup_term() (err error) {
 	var data []byte
 	var header [6]int16
 	var str_offset, table_offset int16
 
 	data, err = load_terminfo()
 	if err != nil {
-		return setup_term_builtin()
+		return t.setup_term_builtin()
 	}
 
 	rd := bytes.NewReader(data)
@@ -158,24 +158,24 @@ func setup_term() (err error) {
 	str_offset = ti_header_length + header[1] + header[2] + 2*header[3]
 	table_offset = str_offset + 2*header[4]
 
-	keys = make([]string, 0xFFFF-key_min)
-	for i, _ := range keys {
-		keys[i], err = ti_read_string(rd, str_offset+2*ti_keys[i], table_offset)
+	t.keys = make([]string, 0xFFFF-key_min)
+	for i, _ := range t.keys {
+		t.keys[i], err = ti_read_string(rd, str_offset+2*ti_keys[i], table_offset)
 		if err != nil {
 			return
 		}
 	}
-	funcs = make([]string, t_max_funcs)
+	t.funcs = make([]string, t_max_funcs)
 	// the last two entries are reserved for mouse. because the table offset is
 	// not there, the two entries have to fill in manually
-	for i, _ := range funcs[:len(funcs)-2] {
-		funcs[i], err = ti_read_string(rd, str_offset+2*ti_funcs[i], table_offset)
+	for i, _ := range t.funcs[:len(t.funcs)-2] {
+		t.funcs[i], err = ti_read_string(rd, str_offset+2*ti_funcs[i], table_offset)
 		if err != nil {
 			return
 		}
 	}
-	funcs[t_max_funcs-2] = ti_mouse_enter
-	funcs[t_max_funcs-1] = ti_mouse_leave
+	t.funcs[t_max_funcs-2] = ti_mouse_enter
+	t.funcs[t_max_funcs-1] = ti_mouse_leave
 	return nil
 }
 

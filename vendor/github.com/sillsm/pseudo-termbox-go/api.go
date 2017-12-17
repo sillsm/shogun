@@ -4,6 +4,7 @@ package termbox
 
 import "fmt"
 import "github.com/mattn/go-runewidth"
+import _ "io"
 import "os"
 import "os/signal"
 import "syscall"
@@ -20,40 +21,65 @@ import "runtime"
 //              panic(err)
 //      }
 //      defer termbox.Close()
-func Init() error {
+
+func NewClient() *TermClient {
+	t := TermClient{}
+	t.input_mode = InputEsc
+	t.output_mode = OutputNormal
+	t.lastfg = attr_invalid
+	t.lastbg = attr_invalid
+	t.lastx = coord_invalid
+	t.lasty = coord_invalid
+	t.cursor_x = cursor_hidden
+	t.cursor_y = cursor_hidden
+	t.foreground = ColorDefault
+	t.background = ColorDefault
+	t.inbuf = make([]byte, 0, 64)
+	t.sigwinch = make(chan os.Signal, 1)
+	t.sigio = make(chan os.Signal, 1)
+	t.quit = make(chan int)
+	t.input_comm = make(chan input_event)
+	t.Input_comm = make(chan input_event)
+	t.Win_chan = make(chan Winsize)
+	t.interrupt_comm = make(chan struct{})
+	t.intbuf = make([]byte, 0, 16)
+	return &t
+}
+
+func (t *TermClient) Init() error {
 	var err error
 
-	out, err = os.OpenFile("/dev/tty", syscall.O_WRONLY, 0)
+	t.out, err = os.OpenFile("/dev/tty", syscall.O_WRONLY, 0)
 	if err != nil {
 		return err
 	}
-	in, err = syscall.Open("/dev/tty", syscall.O_RDONLY, 0)
+	t.in, err = syscall.Open("/dev/tty", syscall.O_RDONLY, 0)
 	if err != nil {
 		return err
 	}
 
-	err = setup_term()
+	err = t.setup_term()
 	if err != nil {
 		return fmt.Errorf("termbox: error while reading terminfo data: %v", err)
 	}
 
-	signal.Notify(sigwinch, syscall.SIGWINCH)
-	signal.Notify(sigio, syscall.SIGIO)
+	signal.Notify(t.sigwinch, syscall.SIGWINCH)
+	signal.Notify(t.sigio, syscall.SIGIO)
 
-	_, err = fcntl(in, syscall.F_SETFL, syscall.O_ASYNC|syscall.O_NONBLOCK)
+	_, err = t.fcntl(t.in, syscall.F_SETFL, syscall.O_ASYNC|syscall.O_NONBLOCK)
 	if err != nil {
 		return err
 	}
-	_, err = fcntl(in, syscall.F_SETOWN, syscall.Getpid())
+	_, err = t.fcntl(t.in, syscall.F_SETOWN, syscall.Getpid())
 	if runtime.GOOS != "darwin" && err != nil {
 		return err
 	}
-	err = tcgetattr(out.Fd(), &orig_tios)
+	err = t.tcgetattr(t.out.Fd(), &t.orig_tios)
 	if err != nil {
 		return err
 	}
 
-	tios := orig_tios
+	tios := t.orig_tios
 	tios.Iflag &^= syscall_IGNBRK | syscall_BRKINT | syscall_PARMRK |
 		syscall_ISTRIP | syscall_INLCR | syscall_IGNCR |
 		syscall_ICRNL | syscall_IXON
@@ -64,103 +90,103 @@ func Init() error {
 	tios.Cc[syscall_VMIN] = 1
 	tios.Cc[syscall_VTIME] = 0
 
-	err = tcsetattr(out.Fd(), &tios)
+	err = t.tcsetattr(t.out.Fd(), &tios)
 	if err != nil {
 		return err
 	}
 
-	out.WriteString(funcs[t_enter_ca])
-	out.WriteString(funcs[t_enter_keypad])
-	out.WriteString(funcs[t_hide_cursor])
-	out.WriteString(funcs[t_clear_screen])
+	t.outbuf.WriteString(t.funcs[t_enter_ca])
+	t.outbuf.WriteString(t.funcs[t_enter_keypad])
+	t.outbuf.WriteString(t.funcs[t_hide_cursor])
+	t.outbuf.WriteString(t.funcs[t_clear_screen])
 
-	termw, termh = get_term_size(out.Fd())
-	back_buffer.init(termw, termh)
-	front_buffer.init(termw, termh)
-	back_buffer.clear()
-	front_buffer.clear()
+	t.termw, t.termh = t.get_term_size(t.out.Fd())
+	t.back_buffer.init(t.termw, t.termh)
+	t.front_buffer.init(t.termw, t.termh)
+	t.back_buffer.clear(t)
+	t.front_buffer.clear(t)
 
 	go func() {
 		buf := make([]byte, 128)
 		for {
 			select {
-			case <-sigio:
+			case <-t.sigio:
 				for {
-					n, err := syscall.Read(in, buf)
+					n, err := syscall.Read(t.in, buf)
 					if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK {
 						break
 					}
 					select {
-					case input_comm <- input_event{buf[:n], err}:
-						ie := <-input_comm
+					case t.input_comm <- input_event{buf[:n], err}:
+						ie := <-t.input_comm
 						buf = ie.data[:128]
-					case <-quit:
+					case <-t.quit:
 						return
 					}
 				}
-			case <-quit:
+			case <-t.quit:
 				return
 			}
 		}
 	}()
 
-	IsInit = true
+	t.IsInit = true
 	return nil
 }
 
 // Interrupt an in-progress call to PollEvent by causing it to return
 // EventInterrupt.  Note that this function will block until the PollEvent
 // function has successfully been interrupted.
-func Interrupt() {
-	interrupt_comm <- struct{}{}
+func (t *TermClient) Interrupt() {
+	t.interrupt_comm <- struct{}{}
 }
 
 // Finalizes termbox library, should be called after successful initialization
 // when termbox's functionality isn't required anymore.
-func Close() {
-	quit <- 1
-	out.WriteString(funcs[t_show_cursor])
-	out.WriteString(funcs[t_sgr0])
-	out.WriteString(funcs[t_clear_screen])
-	out.WriteString(funcs[t_exit_ca])
-	out.WriteString(funcs[t_exit_keypad])
-	out.WriteString(funcs[t_exit_mouse])
-	tcsetattr(out.Fd(), &orig_tios)
+func (t *TermClient) Close() {
+	t.quit <- 1
+	t.out.WriteString(t.funcs[t_show_cursor])
+	t.out.WriteString(t.funcs[t_sgr0])
+	t.out.WriteString(t.funcs[t_clear_screen])
+	t.out.WriteString(t.funcs[t_exit_ca])
+	t.out.WriteString(t.funcs[t_exit_keypad])
+	t.out.WriteString(t.funcs[t_exit_mouse])
+	t.tcsetattr(t.out.Fd(), &t.orig_tios)
 
-	out.Close()
-	syscall.Close(in)
+	t.out.Close()
+	syscall.Close(t.in)
 
 	// reset the state, so that on next Init() it will work again
-	termw = 0
-	termh = 0
-	input_mode = InputEsc
-	out = nil
-	in = 0
-	lastfg = attr_invalid
-	lastbg = attr_invalid
-	lastx = coord_invalid
-	lasty = coord_invalid
-	cursor_x = cursor_hidden
-	cursor_y = cursor_hidden
-	foreground = ColorDefault
-	background = ColorDefault
-	IsInit = false
+	t.termw = 0
+	t.termh = 0
+	t.input_mode = InputEsc
+	t.out = nil
+	t.in = 0
+	t.lastfg = attr_invalid
+	t.lastbg = attr_invalid
+	t.lastx = coord_invalid
+	t.lasty = coord_invalid
+	t.cursor_x = cursor_hidden
+	t.cursor_y = cursor_hidden
+	t.foreground = ColorDefault
+	t.background = ColorDefault
+	t.IsInit = false
 }
 
 // Synchronizes the internal back buffer with the terminal.
-func Flush() error {
+func (t *TermClient) Flush() error {
 	// invalidate cursor position
-	lastx = coord_invalid
-	lasty = coord_invalid
+	t.lastx = coord_invalid
+	t.lasty = coord_invalid
 
-	update_size_maybe()
+	t.update_size_maybe()
 
-	for y := 0; y < front_buffer.height; y++ {
-		line_offset := y * front_buffer.width
-		for x := 0; x < front_buffer.width; {
+	for y := 0; y < t.front_buffer.height; y++ {
+		line_offset := y * t.front_buffer.width
+		for x := 0; x < t.front_buffer.width; {
 			cell_offset := line_offset + x
-			back := &back_buffer.cells[cell_offset]
-			front := &front_buffer.cells[cell_offset]
+			back := &t.back_buffer.cells[cell_offset]
+			front := &t.front_buffer.cells[cell_offset]
 			if back.Ch < ' ' {
 				back.Ch = ' '
 			}
@@ -173,17 +199,17 @@ func Flush() error {
 				continue
 			}
 			*front = *back
-			send_attr(back.Fg, back.Bg)
+			t.send_attr(back.Fg, back.Bg)
 
-			if w == 2 && x == front_buffer.width-1 {
+			if w == 2 && x == t.front_buffer.width-1 {
 				// there's not enough space for 2-cells rune,
 				// let's just put a space in there
-				send_char(x, y, ' ')
+				t.send_char(x, y, ' ')
 			} else {
-				send_char(x, y, back.Ch)
+				t.send_char(x, y, back.Ch)
 				if w == 2 {
 					next := cell_offset + 1
-					front_buffer.cells[next] = Cell{
+					t.front_buffer.cells[next] = Cell{
 						Ch: 0,
 						Fg: back.Fg,
 						Bg: back.Bg,
@@ -193,51 +219,51 @@ func Flush() error {
 			x += w
 		}
 	}
-	if !is_cursor_hidden(cursor_x, cursor_y) {
-		write_cursor(cursor_x, cursor_y)
+	if !is_cursor_hidden(t.cursor_x, t.cursor_y) {
+		t.write_cursor(t.cursor_x, t.cursor_y)
 	}
-	return flush()
+	return t.flush()
 }
 
 // Sets the position of the cursor. See also HideCursor().
-func SetCursor(x, y int) {
-	if is_cursor_hidden(cursor_x, cursor_y) && !is_cursor_hidden(x, y) {
-		outbuf.WriteString(funcs[t_show_cursor])
+func (t *TermClient) SetCursor(x, y int) {
+	if is_cursor_hidden(t.cursor_x, t.cursor_y) && !is_cursor_hidden(x, y) {
+		t.outbuf.WriteString(t.funcs[t_show_cursor])
 	}
 
-	if !is_cursor_hidden(cursor_x, cursor_y) && is_cursor_hidden(x, y) {
-		outbuf.WriteString(funcs[t_hide_cursor])
+	if !is_cursor_hidden(t.cursor_x, t.cursor_y) && is_cursor_hidden(x, y) {
+		t.outbuf.WriteString(t.funcs[t_hide_cursor])
 	}
 
-	cursor_x, cursor_y = x, y
-	if !is_cursor_hidden(cursor_x, cursor_y) {
-		write_cursor(cursor_x, cursor_y)
+	t.cursor_x, t.cursor_y = x, y
+	if !is_cursor_hidden(t.cursor_x, t.cursor_y) {
+		t.write_cursor(t.cursor_x, t.cursor_y)
 	}
 }
 
 // The shortcut for SetCursor(-1, -1).
-func HideCursor() {
-	SetCursor(cursor_hidden, cursor_hidden)
+func (t *TermClient) HideCursor() {
+	t.SetCursor(cursor_hidden, cursor_hidden)
 }
 
 // Changes cell's parameters in the internal back buffer at the specified
 // position.
-func SetCell(x, y int, ch rune, fg, bg Attribute) {
-	if x < 0 || x >= back_buffer.width {
+func (t *TermClient) SetCell(x, y int, ch rune, fg, bg Attribute) {
+	if x < 0 || x >= t.back_buffer.width {
 		return
 	}
-	if y < 0 || y >= back_buffer.height {
+	if y < 0 || y >= t.back_buffer.height {
 		return
 	}
 
-	back_buffer.cells[y*back_buffer.width+x] = Cell{ch, fg, bg}
+	t.back_buffer.cells[y*t.back_buffer.width+x] = Cell{ch, fg, bg}
 }
 
 // Returns a slice into the termbox's back buffer. You can get its dimensions
 // using 'Size' function. The slice remains valid as long as no 'Clear' or
 // 'Flush' function calls were made after call to this function.
-func CellBuffer() []Cell {
-	return back_buffer.cells
+func (t *TermClient) CellBuffer() []Cell {
+	return t.back_buffer.cells
 }
 
 // After getting a raw event from PollRawEvent function call, you can parse it
@@ -251,15 +277,16 @@ func CellBuffer() []Cell {
 // these bytes, because termbox cannot recognize them.
 //
 // NOTE: This API is experimental and may change in future.
-func ParseEvent(data []byte) Event {
+func (t *TermClient) ParseEvent(data []byte) Event {
 	event := Event{Type: EventKey}
-	ok := extract_event(data, &event)
+	ok := t.extract_event(data, &event)
 	if !ok {
 		return Event{Type: EventNone, N: event.N}
 	}
 	return event
 }
 
+/*
 // Wait for an event and return it. This is a blocking function call. Instead
 // of EventKey and EventMouse it returns EventRaw events. Raw event is written
 // into `data` slice and Event's N field is set to the amount of bytes written.
@@ -267,7 +294,7 @@ func ParseEvent(data []byte) Event {
 // vary on different platforms.
 //
 // NOTE: This API is experimental and may change in future.
-func PollRawEvent(data []byte) Event {
+func (t *TermClient) PollRawEvent(data []byte) Event {
 	if len(data) == 0 {
 		panic("len(data) >= 1 is a requirement")
 	}
@@ -299,18 +326,18 @@ func PollRawEvent(data []byte) Event {
 			return event
 		}
 	}
-}
+}*/
 
 // Wait for an event and return it. This is a blocking function call.
-func PollEvent() Event {
+func (t *TermClient) PollEvent() Event {
 	var event Event
 
 	// try to extract event from input buffer, return on success
 	event.Type = EventKey
-	ok := extract_event(inbuf, &event)
+	ok := t.extract_event(t.inbuf, &event)
 	if event.N != 0 {
-		copy(inbuf, inbuf[event.N:])
-		inbuf = inbuf[:len(inbuf)-event.N]
+		copy(t.inbuf, t.inbuf[event.N:])
+		t.inbuf = t.inbuf[:len(t.inbuf)-event.N]
 	}
 	if ok {
 		return event
@@ -318,46 +345,83 @@ func PollEvent() Event {
 
 	for {
 		select {
-		case ev := <-input_comm:
+		case ev := <-t.input_comm:
 			if ev.err != nil {
 				return Event{Type: EventError, Err: ev.err}
 			}
 
-			inbuf = append(inbuf, ev.data...)
-			input_comm <- ev
-			ok := extract_event(inbuf, &event)
+			t.inbuf = append(t.inbuf, ev.data...)
+			t.input_comm <- ev
+			ok := t.extract_event(t.inbuf, &event)
 			if event.N != 0 {
-				copy(inbuf, inbuf[event.N:])
-				inbuf = inbuf[:len(inbuf)-event.N]
+				copy(t.inbuf, t.inbuf[event.N:])
+				t.inbuf = t.inbuf[:len(t.inbuf)-event.N]
 			}
 			if ok {
 				return event
 			}
-		case <-interrupt_comm:
+		case <-t.interrupt_comm:
 			event.Type = EventInterrupt
 			return event
 
-		case <-sigwinch:
+		case <-t.sigwinch:
 			event.Type = EventResize
-			event.Width, event.Height = get_term_size(out.Fd())
+			event.Width, event.Height = t.get_term_size(t.out.Fd())
 			return event
 		}
 	}
+}
+
+// Wait for an event and return it. This is a blocking function call.
+func (t *TermClient) PollEvent2(b []byte) Event {
+	var event Event
+	fmt.Printf("Hi, I got %v\n", b)
+	t.extract_event(b, &event)
+	return event
+	/*
+		for {
+			select {
+			case ev := <-Input_comm: // CHANGED
+				if ev.err != nil {
+					return Event{Type: EventError, Err: ev.err}
+				}
+
+				inbuf = append(inbuf, ev.data...)
+				Input_comm <- ev // CHANGED
+				ok := extract_event(inbuf, &event)
+				if event.N != 0 {
+					copy(inbuf, inbuf[event.N:])
+					inbuf = inbuf[:len(inbuf)-event.N]
+				}
+				if ok {
+					return event
+				}
+			case <-interrupt_comm:
+				event.Type = EventInterrupt
+				return event
+
+			case <-sigwinch:
+				event.Type = EventResize
+				event.Width, event.Height = get_term_size(out.Fd())
+				return event
+			}
+		}
+	*/
 }
 
 // Returns the size of the internal back buffer (which is mostly the same as
 // terminal's window size in characters). But it doesn't always match the size
 // of the terminal window, after the terminal size has changed, the internal
 // back buffer will get in sync only after Clear or Flush function calls.
-func Size() (width int, height int) {
-	return termw, termh
+func (t *TermClient) Size() (width int, height int) {
+	return t.termw, t.termh
 }
 
 // Clears the internal back buffer.
-func Clear(fg, bg Attribute) error {
-	foreground, background = fg, bg
-	err := update_size_maybe()
-	back_buffer.clear()
+func (t *TermClient) Clear(fg, bg Attribute) error {
+	t.foreground, t.background = fg, bg
+	err := t.update_size_maybe()
+	t.back_buffer.clear(t)
 	return err
 }
 
@@ -374,9 +438,9 @@ func Clear(fg, bg Attribute) error {
 //
 // If 'mode' is InputCurrent, returns the current input mode. See also Input*
 // constants.
-func SetInputMode(mode InputMode) InputMode {
+func (t *TermClient) SetInputMode(mode InputMode) InputMode {
 	if mode == InputCurrent {
-		return input_mode
+		return t.input_mode
 	}
 	if mode&(InputEsc|InputAlt) == 0 {
 		mode |= InputEsc
@@ -385,13 +449,13 @@ func SetInputMode(mode InputMode) InputMode {
 		mode &^= InputAlt
 	}
 	if mode&InputMouse != 0 {
-		out.WriteString(funcs[t_enter_mouse])
+		t.outbuf.WriteString(t.funcs[t_enter_mouse])
 	} else {
-		out.WriteString(funcs[t_exit_mouse])
+		t.outbuf.WriteString(t.funcs[t_exit_mouse])
 	}
 
-	input_mode = mode
-	return input_mode
+	t.input_mode = mode
+	return t.input_mode
 }
 
 // Sets the termbox output mode. Termbox has four output options:
@@ -433,25 +497,25 @@ func SetInputMode(mode InputMode) InputMode {
 //
 // Note that this may return a different OutputMode than the one requested,
 // as the requested mode may not be available on the target platform.
-func SetOutputMode(mode OutputMode) OutputMode {
+func (t *TermClient) SetOutputMode(mode OutputMode) OutputMode {
 	if mode == OutputCurrent {
-		return output_mode
+		return t.output_mode
 	}
 
-	output_mode = mode
-	return output_mode
+	t.output_mode = mode
+	return t.output_mode
 }
 
 // Sync comes handy when something causes desync between termbox's understanding
 // of a terminal buffer and the reality. Such as a third party process. Sync
 // forces a complete resync between the termbox and a terminal, it may not be
 // visually pretty though.
-func Sync() error {
-	front_buffer.clear()
-	err := send_clear()
+func (t *TermClient) Sync() error {
+	t.front_buffer.clear(t)
+	err := t.send_clear()
 	if err != nil {
 		return err
 	}
 
-	return Flush()
+	return t.Flush()
 }

@@ -14,7 +14,7 @@ func (this *cellbuf) init(width, height int) {
 	this.cells = make([]Cell, width*height)
 }
 
-func (this *cellbuf) resize(width, height int) {
+func (this *cellbuf) resize(t *TermClient, width, height int) {
 	if this.width == width && this.height == height {
 		return
 	}
@@ -24,7 +24,7 @@ func (this *cellbuf) resize(width, height int) {
 	oldcells := this.cells
 
 	this.init(width, height)
-	this.clear()
+	this.clear(t)
 
 	minw, minh := oldw, oldh
 
@@ -43,12 +43,12 @@ func (this *cellbuf) resize(width, height int) {
 	}
 }
 
-func (this *cellbuf) clear() {
+func (this *cellbuf) clear(t *TermClient) {
 	for i := range this.cells {
 		c := &this.cells[i]
 		c.Ch = ' '
-		c.Fg = foreground
-		c.Bg = background
+		c.Fg = t.foreground
+		c.Bg = t.background
 	}
 }
 

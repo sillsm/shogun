@@ -10,6 +10,7 @@ import "strings"
 import "strconv"
 import "os"
 import "io"
+import "fmt"
 
 // private API
 
@@ -72,9 +73,11 @@ type TermClient struct {
 	cursor_y       int
 	foreground     Attribute
 	background     Attribute
+	input_buf      []byte
 	inbuf          []byte
 	outbuf         bytes.Buffer
-	Out            bytes.Buffer
+	Out            io.Writer
+	In             io.Reader
 	sigwinch       chan os.Signal
 	sigio          chan os.Signal
 	quit           chan int
@@ -245,7 +248,7 @@ func (t *TermClient) send_char(x, y int, ch rune) {
 func (t *TermClient) flush() error {
 	// Note(max). Simple as this. You can divert screen output to bytes buffer
 	// here, instead of file or screen handler.
-	_, err := io.Copy(&t.Out, &t.outbuf)
+	_, err := io.Copy(t.Out, &t.outbuf)
 	t.outbuf.Reset()
 	return err
 }
@@ -316,6 +319,7 @@ func (t *TermClient) parse_mouse_event(event *Event, buf string) (int, bool) {
 		// \033 [ M Cb Cx Cy
 		b := buf[3] - 32
 		switch b & 3 {
+		// 2 LOB: _ _ _ _ _ _ 1 1
 		case 0:
 			if b&64 != 0 {
 				event.Key = MouseWheelUp
@@ -341,6 +345,7 @@ func (t *TermClient) parse_mouse_event(event *Event, buf string) (int, bool) {
 		}
 
 		// the coord is 1,1 for upper left
+		fmt.Printf("Just asig %v, %v\n", int(buf[4]), int(buf[5]))
 		event.MouseX = int(buf[4]) - 1 - 32
 		event.MouseY = int(buf[5]) - 1 - 32
 		return 6, true
@@ -467,12 +472,15 @@ func (t *TermClient) extract_raw_event(data []byte, event *Event) bool {
 }
 
 func (t *TermClient) extract_event(inpbuf []byte, event *Event) bool {
+	fmt.Printf("t.extract_event was called, with inpbuf size %v \n", len(inpbuf))
 	if len(inpbuf) == 0 {
+		fmt.Printf("t.extract_event got an empty input buffer \n")
 		event.N = 0
 		return false
 	}
 
 	if inpbuf[0] == '\033' {
+		fmt.Printf("t.extract_event just found \\033 \n")
 		// possible escape sequence
 		if n, ok := t.parse_escape_sequence(event, inpbuf); n != 0 {
 			event.N = n
@@ -508,6 +516,7 @@ func (t *TermClient) extract_event(inpbuf []byte, event *Event) bool {
 
 	// first of all check if it's a functional key
 	if Key(inpbuf[0]) <= KeySpace || Key(inpbuf[0]) == KeyBackspace2 {
+		fmt.Printf("t.extract_event thought it found a key \n")
 		// fill event, pop buffer, return success
 		event.Ch = 0
 		event.Key = Key(inpbuf[0])
@@ -517,12 +526,14 @@ func (t *TermClient) extract_event(inpbuf []byte, event *Event) bool {
 
 	// the only possible option is utf8 rune
 	if r, n := utf8.DecodeRune(inpbuf); r != utf8.RuneError {
+		fmt.Printf("t.extract_event tried to decode a rune \n")
 		event.Ch = r
 		event.Key = 0
 		event.N = n
 		return true
 	}
 
+	fmt.Printf("t.extract_event fell through every single case \n")
 	return false
 }
 

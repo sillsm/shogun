@@ -1,4 +1,5 @@
 // +build !windows
+// Reference: ANSI/VT100 Terminal Control Escape Sequences
 
 package termbox
 
@@ -43,6 +44,8 @@ func NewClient() *TermClient {
 	t.Win_chan = make(chan Winsize)
 	t.interrupt_comm = make(chan struct{})
 	t.intbuf = make([]byte, 0, 16)
+	t.inbuf = make([]byte, 0, 128)
+	t.input_buf = make([]byte, 0, 128)
 	return &t
 }
 
@@ -373,10 +376,24 @@ func (t *TermClient) PollEvent() Event {
 }
 
 // Wait for an event and return it. This is a blocking function call.
-func (t *TermClient) PollEvent2(b []byte) Event {
+func (t *TermClient) PollEvent2() Event {
 	var event Event
-	fmt.Printf("Hi, I got %v\n", b)
-	t.extract_event(b, &event)
+	//t.inputerBuffer := make([]byte, 128)
+	buf := make([]byte, 128)
+	n, err := t.In.Read(buf)
+	fmt.Printf("Got here, here's the skinny\n")
+	if err != nil {
+		panic(err)
+	}
+	//buf := []byte{}
+	if len(buf) == 0 {
+		return event
+	}
+	//io.ReadFull(s, buf)
+	fmt.Printf("In PollEvent2 %q\t%v\n", buf[:n], n)
+	fmt.Printf("First byte: %o\n", buf[0])
+	t.extract_event(buf, &event)
+	fmt.Printf("Called extract event \n")
 	return event
 	/*
 		for {

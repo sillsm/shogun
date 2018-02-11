@@ -11,6 +11,7 @@ import "strconv"
 import "os"
 import "io"
 import "fmt"
+import "time"
 
 // private API
 
@@ -56,24 +57,26 @@ type TermClient struct {
 	funcs []string
 
 	// termbox inner state
-	orig_tios      syscall_Termios
-	back_buffer    cellbuf
-	front_buffer   cellbuf
-	termw          int
-	termh          int
-	input_mode     InputMode
-	output_mode    OutputMode
-	out            *os.File
-	in             int
-	lastfg         Attribute
-	lastbg         Attribute
-	lastx          int
-	lasty          int
-	cursor_x       int
-	cursor_y       int
-	foreground     Attribute
-	background     Attribute
-	input_buf      []byte
+	orig_tios    syscall_Termios
+	back_buffer  cellbuf
+	front_buffer cellbuf
+	termw        int
+	termh        int
+	input_mode   InputMode
+	output_mode  OutputMode
+	out          *os.File
+	in           int
+	lastfg       Attribute
+	lastbg       Attribute
+	lastx        int
+	lasty        int
+	cursor_x     int
+	cursor_y     int
+	foreground   Attribute
+	background   Attribute
+	input_buf    []byte
+	scratch      []byte
+
 	inbuf          []byte
 	outbuf         bytes.Buffer
 	Out            io.Writer
@@ -313,7 +316,30 @@ func (t *TermClient) tcgetattr(fd uintptr, termios *syscall_Termios) error {
 	return nil
 }
 
-func (t *TermClient) parse_mouse_event(event *Event, buf string) (int, bool) {
+func (t *TermClient) waitForByte() {
+	time.Sleep(time.Millisecond * 10)
+}
+
+func (t *TermClient) parse_mouse_event(event *Event) (int, bool) {
+	// Make sure there's enough input for a mouse event.
+	for i := 0; i < 10; i++ {
+		buf := string(t.input_buf)
+		if strings.HasPrefix(buf, "\033[M") && len(buf) >= 6 {
+			break
+		}
+		if strings.HasPrefix(buf, "\033[<") || strings.HasPrefix(buf, "\033[") {
+			mi := strings.IndexAny(buf, "Mm")
+			if mi != -1 {
+				break
+			}
+		}
+
+		t.attemptRead()
+		t.waitForByte()
+		//fmt.Printf(" err %v, %v\n", i, t.input_buf)
+	}
+
+	buf := string(t.input_buf)
 	if strings.HasPrefix(buf, "\033[M") && len(buf) >= 6 {
 		// X10 mouse encoding, the simplest one
 		// \033 [ M Cb Cx Cy
@@ -439,6 +465,7 @@ func (t *TermClient) parse_mouse_event(event *Event, buf string) (int, bool) {
 }
 
 func (t *TermClient) parse_escape_sequence(event *Event, buf []byte) (int, bool) {
+	//Need new logic here!
 	bufstr := string(buf)
 	for i, key := range t.keys {
 		if strings.HasPrefix(bufstr, key) {
@@ -449,7 +476,19 @@ func (t *TermClient) parse_escape_sequence(event *Event, buf []byte) (int, bool)
 	}
 
 	// if none of the keys match, let's try mouse seqences
-	return t.parse_mouse_event(event, bufstr)
+	// TODO(Max): Ensure parse_mouse_event has a full muffer to read.
+	return t.parse_mouse_event(event)
+}
+
+func (t *TermClient) attemptRead() {
+	zod := make([]byte, 64)
+
+	n, err := t.In.Read(zod)
+	if err != nil {
+		// TODO(max): handle this more elegantly than panicing
+		panic(err)
+	}
+	t.input_buf = append(t.input_buf, zod[:n]...)
 }
 
 func (t *TermClient) extract_raw_event(data []byte, event *Event) bool {
@@ -471,18 +510,19 @@ func (t *TermClient) extract_raw_event(data []byte, event *Event) bool {
 	return true
 }
 
-func (t *TermClient) extract_event(inpbuf []byte, event *Event) bool {
-	fmt.Printf("t.extract_event was called, with inpbuf size %v \n", len(inpbuf))
-	if len(inpbuf) == 0 {
+func (t *TermClient) extract_event(event *Event) bool {
+	//fmt.Printf("t.extract_event was called, with inpbuf size %v \n", len(inpbuf))
+	if len(t.input_buf) == 0 {
 		fmt.Printf("t.extract_event got an empty input buffer \n")
 		event.N = 0
 		return false
 	}
 
-	if inpbuf[0] == '\033' {
-		fmt.Printf("t.extract_event just found \\033 \n")
+	if t.input_buf[0] == '\033' {
+		//fmt.Printf("I caught an escape sequence\n")
+		//fmt.Printf("t.extract_event just found \\033 \n")
 		// possible escape sequence
-		if n, ok := t.parse_escape_sequence(event, inpbuf); n != 0 {
+		if n, ok := t.parse_escape_sequence(event, t.input_buf); n != 0 {
 			event.N = n
 			return ok
 		}
@@ -499,7 +539,7 @@ func (t *TermClient) extract_event(inpbuf []byte, event *Event) bool {
 		case t.input_mode&InputAlt != 0:
 			// if we're in alt mode, set Alt modifier to event and redo parsing
 			event.Mod = ModAlt
-			ok := t.extract_event(inpbuf[1:], event)
+			ok := t.extract_event(event)
 			if ok {
 				event.N++
 			} else {
@@ -515,25 +555,22 @@ func (t *TermClient) extract_event(inpbuf []byte, event *Event) bool {
 	// so, it's a FUNCTIONAL KEY or a UNICODE character
 
 	// first of all check if it's a functional key
-	if Key(inpbuf[0]) <= KeySpace || Key(inpbuf[0]) == KeyBackspace2 {
-		fmt.Printf("t.extract_event thought it found a key \n")
+	if Key(t.input_buf[0]) <= KeySpace || Key(t.input_buf[0]) == KeyBackspace2 {
 		// fill event, pop buffer, return success
 		event.Ch = 0
-		event.Key = Key(inpbuf[0])
+		event.Key = Key(t.input_buf[0])
 		event.N = 1
 		return true
 	}
 
 	// the only possible option is utf8 rune
-	if r, n := utf8.DecodeRune(inpbuf); r != utf8.RuneError {
-		fmt.Printf("t.extract_event tried to decode a rune \n")
+	if r, n := utf8.DecodeRune(t.input_buf); r != utf8.RuneError {
 		event.Ch = r
 		event.Key = 0
 		event.N = n
 		return true
 	}
 
-	fmt.Printf("t.extract_event fell through every single case \n")
 	return false
 }
 

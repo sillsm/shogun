@@ -3,7 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"github.com/nsf/termbox-go"
+	"github.com/sillsm/pseudo-termbox-go"
 	"math/rand"
 	"os"
 	"sync"
@@ -28,6 +28,8 @@ var game = [][]byte{
 	[]byte("|.........................................................................|"),
 	[]byte("---------------------------------------------------------------------------"),
 }
+
+var tbox *termbox.TermClient
 
 // Move Up
 // Attack Monster (null)
@@ -148,7 +150,7 @@ func roll(num int, sides int) int {
 func drawGame(l *Level) {
 	// Draw Messages
 	for i, c := range GlobalMessages.Display() {
-		termbox.SetCell(i, 0, c, termbox.ColorWhite, termbox.ColorBlack)
+		tbox.SetCell(i, 0, c, termbox.ColorWhite, termbox.ColorBlack)
 	}
 
 	// Draw Map
@@ -172,7 +174,7 @@ func drawGame(l *Level) {
 				ch = rune(r)
 			}
 
-			termbox.SetCell(col, row+rowOffset, ch, termbox.Attribute(fg), termbox.Attribute(bg))
+			tbox.SetCell(col, row+rowOffset, ch, termbox.Attribute(fg), termbox.Attribute(bg))
 		}
 	}
 
@@ -180,7 +182,7 @@ func drawGame(l *Level) {
 	for _, e := range l.Entities {
 		x := e.GetAttribute("xpos")
 		y := e.GetAttribute("ypos")
-		termbox.SetCell(x, y+rowOffset, e.Symbol, termbox.ColorWhite, termbox.ColorBlack)
+		tbox.SetCell(x, y+rowOffset, e.Symbol, termbox.ColorWhite, termbox.ColorBlack)
 
 	}
 
@@ -188,7 +190,7 @@ func drawGame(l *Level) {
 	statOffset := rowOffset + len(l.Game)
 	stats := fmt.Sprintf("AC: %v\t HP:%v\t Str:%v\t", Player.GetAttribute("AC"), Player.GetAttribute("HP"), Player.GetAttribute("Str"))
 	for i, c := range stats {
-		termbox.SetCell(i, statOffset, c, termbox.ColorWhite, termbox.ColorBlack)
+		tbox.SetCell(i, statOffset, c, termbox.ColorWhite, termbox.ColorBlack)
 	}
 
 }
@@ -307,22 +309,25 @@ func main() {
 	GlobalMessages.Broadcast("Third message.")
 
 	// Animation Setup
-	err := termbox.Init()
+	tbox = termbox.NewClient()
+	err := tbox.Init()
 	if err != nil {
 		fmt.Printf("Panicing\n")
 		panic(err)
 	}
-	defer termbox.Close()
-	termbox.SetInputMode(termbox.InputEsc | termbox.InputMouse)
+	tbox.Out = os.Stdout
+	tbox.In = os.Stdin
+	defer tbox.Close()
+	tbox.SetInputMode(termbox.InputEsc | termbox.InputMouse)
 
 	// Animation Loop
 	go func() {
-		termbox.SetOutputMode(termbox.Output256)
+		tbox.SetOutputMode(termbox.Output256)
 		for {
 			time.Sleep(10 * time.Millisecond) // Not necessary, replace with tick mechanic
-			termbox.Clear(termbox.ColorBlack, termbox.ColorBlack)
+			tbox.Clear(termbox.ColorBlack, termbox.ColorBlack)
 			drawGame(level)
-			termbox.Flush()
+			tbox.Flush()
 		}
 	}()
 
@@ -330,7 +335,7 @@ func main() {
 	m, _ := Player.Predicates["Movement"]
 loop:
 	for {
-		switch ev := termbox.PollEvent(); ev.Type {
+		switch ev := tbox.PollEvent(); ev.Type {
 		case termbox.EventKey:
 			level.Tick()
 			GlobalMessages.Broadcast("Tick.")

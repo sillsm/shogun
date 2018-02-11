@@ -11,6 +11,10 @@ import "os/signal"
 import "syscall"
 import "runtime"
 
+//import "time"
+
+//import "time"
+
 // public API
 
 // Initializes termbox library. This function should be called before any other functions.
@@ -35,7 +39,6 @@ func NewClient() *TermClient {
 	t.cursor_y = cursor_hidden
 	t.foreground = ColorDefault
 	t.background = ColorDefault
-	t.inbuf = make([]byte, 0, 64)
 	t.sigwinch = make(chan os.Signal, 1)
 	t.sigio = make(chan os.Signal, 1)
 	t.quit = make(chan int)
@@ -45,7 +48,8 @@ func NewClient() *TermClient {
 	t.interrupt_comm = make(chan struct{})
 	t.intbuf = make([]byte, 0, 16)
 	t.inbuf = make([]byte, 0, 128)
-	t.input_buf = make([]byte, 0, 128)
+	t.scratch = make([]byte, 64)
+	fmt.Printf("My input_buf %v\n", len(t.input_buf))
 	return &t
 }
 
@@ -110,19 +114,19 @@ func (t *TermClient) Init() error {
 	t.front_buffer.clear(t)
 
 	go func() {
-		buf := make([]byte, 128)
+		//buf := make([]byte, 128)
 		for {
 			select {
 			case <-t.sigio:
 				for {
-					n, err := syscall.Read(t.in, buf)
-					if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK {
-						break
-					}
+					//n, err := syscall.Read(t.in, buf)
+					//if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK {
+					//		break
+					//		}
 					select {
-					case t.input_comm <- input_event{buf[:n], err}:
-						ie := <-t.input_comm
-						buf = ie.data[:128]
+					//			case t.input_comm <- input_event{buf[:n], err}:
+					//				ie := <-t.input_comm
+					//				buf = ie.data[:128]
 					case <-t.quit:
 						return
 					}
@@ -282,7 +286,7 @@ func (t *TermClient) CellBuffer() []Cell {
 // NOTE: This API is experimental and may change in future.
 func (t *TermClient) ParseEvent(data []byte) Event {
 	event := Event{Type: EventKey}
-	ok := t.extract_event(data, &event)
+	ok := t.extract_event(&event)
 	if !ok {
 		return Event{Type: EventNone, N: event.N}
 	}
@@ -333,97 +337,18 @@ func (t *TermClient) PollRawEvent(data []byte) Event {
 
 // Wait for an event and return it. This is a blocking function call.
 func (t *TermClient) PollEvent() Event {
+	//fmt.Printf("Pollevent2 was called \n")
 	var event Event
 
-	// try to extract event from input buffer, return on success
-	event.Type = EventKey
-	ok := t.extract_event(t.inbuf, &event)
-	if event.N != 0 {
-		copy(t.inbuf, t.inbuf[event.N:])
-		t.inbuf = t.inbuf[:len(t.inbuf)-event.N]
+	t.attemptRead()
+	// Block until there's at least one byte.
+	for len(t.input_buf) == 0 {
+		t.attemptRead()
 	}
-	if ok {
-		return event
-	}
-
-	for {
-		select {
-		case ev := <-t.input_comm:
-			if ev.err != nil {
-				return Event{Type: EventError, Err: ev.err}
-			}
-
-			t.inbuf = append(t.inbuf, ev.data...)
-			t.input_comm <- ev
-			ok := t.extract_event(t.inbuf, &event)
-			if event.N != 0 {
-				copy(t.inbuf, t.inbuf[event.N:])
-				t.inbuf = t.inbuf[:len(t.inbuf)-event.N]
-			}
-			if ok {
-				return event
-			}
-		case <-t.interrupt_comm:
-			event.Type = EventInterrupt
-			return event
-
-		case <-t.sigwinch:
-			event.Type = EventResize
-			event.Width, event.Height = t.get_term_size(t.out.Fd())
-			return event
-		}
-	}
-}
-
-// Wait for an event and return it. This is a blocking function call.
-func (t *TermClient) PollEvent2() Event {
-	var event Event
-	//t.inputerBuffer := make([]byte, 128)
-	buf := make([]byte, 128)
-	n, err := t.In.Read(buf)
-	fmt.Printf("Got here, here's the skinny\n")
-	if err != nil {
-		panic(err)
-	}
-	//buf := []byte{}
-	if len(buf) == 0 {
-		return event
-	}
-	//io.ReadFull(s, buf)
-	fmt.Printf("In PollEvent2 %q\t%v\n", buf[:n], n)
-	fmt.Printf("First byte: %o\n", buf[0])
-	t.extract_event(buf, &event)
-	fmt.Printf("Called extract event \n")
+	t.extract_event(&event)
+	//fmt.Printf("Input buf%q\n", t.input_buf)
+	t.input_buf = t.input_buf[event.N:]
 	return event
-	/*
-		for {
-			select {
-			case ev := <-Input_comm: // CHANGED
-				if ev.err != nil {
-					return Event{Type: EventError, Err: ev.err}
-				}
-
-				inbuf = append(inbuf, ev.data...)
-				Input_comm <- ev // CHANGED
-				ok := extract_event(inbuf, &event)
-				if event.N != 0 {
-					copy(inbuf, inbuf[event.N:])
-					inbuf = inbuf[:len(inbuf)-event.N]
-				}
-				if ok {
-					return event
-				}
-			case <-interrupt_comm:
-				event.Type = EventInterrupt
-				return event
-
-			case <-sigwinch:
-				event.Type = EventResize
-				event.Width, event.Height = get_term_size(out.Fd())
-				return event
-			}
-		}
-	*/
 }
 
 // Returns the size of the internal back buffer (which is mostly the same as
